@@ -1,0 +1,6 @@
+tensorboard
+tensorboardX
+ml-collections
+medpy
+SimpleITK
+h5py
