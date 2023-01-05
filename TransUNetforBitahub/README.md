@@ -6,17 +6,19 @@
 
 注意需要安装运行所需的库（可见requirements.txt）：
 
+```txt
 torch
-​torchvision
-​numpy
-​tqdm
-​scipy（上述库bitahub镜像已经存在（可能），可以删去）
-​tensorboard
-​tensorboardX
-​ml-collections
-​medpy
-​SimpleITK
-​h5py
+torchvision
+numpy
+tqdm
+scipy（上述库bitahub镜像已经存在（可能），可以删去）
+tensorboard
+tensorboardX
+ml-collections
+medpy
+SimpleITK
+h5py
+```
 
 **安装方式：**
 
