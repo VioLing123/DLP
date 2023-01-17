@@ -7,6 +7,11 @@ import torch
 import torch.backends.cudnn as cudnn
 from networks.vit_seg_modeling import VisionTransformer as ViT_seg
 from networks.vit_seg_modeling import CONFIGS as CONFIGS_ViT_seg
+from networks.vit_seg_modeling_add import VisionTransformer_None as ViT_seg_None
+from networks.vit_seg_modeling_add import VisionTransformer_1SkipinPaper as ViT_seg_Skip1
+from networks.vit_seg_modeling_new import VisionTransformer_New as ViT_seg_New
+from networks.vit_seg_modeling_new1 import VisionTransformer_New1 as ViT_seg_New1
+
 from trainer import trainer_synapse
 
 parser = argparse.ArgumentParser()
@@ -34,11 +39,14 @@ parser.add_argument('--img_size', type=int,
 parser.add_argument('--seed', type=int,
                     default=1234, help='random seed')
 parser.add_argument('--n_skip', type=int,
-                    default=3, help='using number of skip-connect, default is num')
+                    default=3, help='using number of skip-connect in CNN, default is num')
+parser.add_argument('--n_skip_trans', type=int,
+                    default=2, help='using number of skip-connect in trans, default is num')
 parser.add_argument('--vit_name', type=str,
                     default='R50-ViT-B_16', help='select one vit model')#使用预训练模型
 parser.add_argument('--vit_patches_size', type=int,
                     default=16, help='vit_patches_size, default is 16')
+parser.add_argument('--decoder', type=str, default='CUP', help='whether use CUP decoder')
 args = parser.parse_args()
 
 
@@ -100,11 +108,22 @@ if __name__ == "__main__":
     config_vit = CONFIGS_ViT_seg[args.vit_name]
     config_vit.n_classes = args.num_classes
     config_vit.n_skip = args.n_skip
-    if args.vit_name.find('R50') != -1: #没找到就返回 -1
+    config_vit.n_skip_trans = args.n_skip_trans
+    if args.vit_name.find('R50') != -1 and (args.decoder == 'CUP' or args.decoder == 'NEW' or args.decoder == 'Skip1' or args.decoder == 'NEW1'): #没找到就返回 -1
         config_vit.patches.grid = (int(args.img_size / args.vit_patches_size), int(args.img_size / args.vit_patches_size))#使用R50时，将对grid进行修改
 
     #创建模型网络
-    net = ViT_seg(config_vit, img_size=args.img_size, num_classes=config_vit.n_classes).cuda()
+    if args.decoder == 'CUP':#使用论文中的CUP结构
+        net = ViT_seg(config_vit, img_size=args.img_size, num_classes=config_vit.n_classes).cuda()
+    elif args.decoder == 'NEW':#使用自己改进的模型
+        net = ViT_seg_New(config_vit, img_size=args.img_size, num_classes=config_vit.n_classes).cuda()
+    elif args.decoder == 'NEW1':#结合Unet将decoder中的upsampling改为conv的形式。其中没有NEW中的trans_skip
+        net = ViT_seg_New1(config_vit, img_size=args.img_size, num_classes=config_vit.n_classes).cuda()
+    elif args.decoder == 'Skip1':#复现论文中1skip的情况
+        net = ViT_seg_Skip1(config_vit, img_size=args.img_size, num_classes=config_vit.n_classes).cuda()        
+    else:#复现论文中decoder使用None的结构
+        net = ViT_seg_None(config_vit, img_size=args.img_size, num_classes=config_vit.n_classes).cuda()
+
     net.load_from(weights=np.load(config_vit.pretrained_path))#提取并设置权重值（默认路径为../model/VioLin/vit_checkpoint/imagenet21k/R50+ViT-B_16.npz）
 
     trainer = {'Synapse': trainer_synapse,}#创建训练模型字典，可以通过key值确定所用的训练模型，目前只有一个

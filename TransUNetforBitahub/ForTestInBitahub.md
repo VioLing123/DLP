@@ -6,17 +6,19 @@
 
 注意需要安装运行所需的库（可见requirements.txt）：
 
+```txt
 torch
-​torchvision
-​numpy
-​tqdm
-​scipy（上述库bitahub镜像已经存在（可能），可以删去）
-​tensorboard
-​tensorboardX
-​ml-collections
-​medpy
-​SimpleITK
-​h5py
+torchvision
+numpy
+tqdm
+scipy（上述库bitahub镜像已经存在（可能），可以删去）
+tensorboard
+tensorboardX
+ml-collections
+medpy
+SimpleITK
+h5py
+```
 
 ##### 安装方式：`pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt`
 
@@ -35,11 +37,13 @@ torch
 #### 3.运行代码：
 
 ##### 1.训练模型：
-`pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt && python train.py`
+`/usr/local/bin/python -m pip install --upgrade pip && pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt && python train.py`
 
 ##### 2.测试模型 
-`pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt && python test_data.py` [注：该方式采用某次训练得到的模型参数文件]
+`/usr/local/bin/python -m pip install --upgrade pip && pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt && python test_data.py` [注：该方式采用某次训练得到的模型参数文件]
 
 ##### 3.训练加测试：
-`pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt && python train.py && python test.py` [注：该方式采用训练出的模型参数计算]
+`/usr/local/bin/python -m pip install --upgrade pip && pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt && python train.py && python test.py` [注：该方式采用训练出的模型参数计算]
 
+##### 4.new added
+`/usr/local/bin/python -m pip install --upgrade pip && pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt && python train.py && python test.py `

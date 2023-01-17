@@ -12,7 +12,7 @@ config_vit.n_classes = 9
 config_vit.n_skip = 3
 config_vit.patches.grid = (14, 14)
 
-images = torch.rand(24,1,224,224)
+images = torch.rand(3,1,224,224)
 net = ViT_seg(config_vit, img_size=224, num_classes=config_vit.n_classes)
 writer.add_graph(net, images)
 writer.flush()

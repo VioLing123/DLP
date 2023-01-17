@@ -19,7 +19,6 @@ from scipy import ndimage
 from . import vit_seg_configs as configs
 from .vit_seg_modeling_resnet_skip import ResNetV2
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -43,9 +42,14 @@ def np2th(weights, conv=False):
 def swish(x):
     return x * torch.sigmoid(x)
 
+def ReShape_new(hidden_states):# n_patch = (H x W)/(P x P) #(3, 196, 768)
+    Batch, n_patch, hidden = hidden_states.size()  # reshape from (B(Batch_size), n_patch, hidden(D in paper)) to (B, h, w, hidden)
+    h, w = int(np.sqrt(n_patch)), int(np.sqrt(n_patch))
+    x = hidden_states.permute(0, 2, 1)#维度转换 (B, n_patch, hidden) -> (B, hidden, n_patch)
+    x = x.contiguous().view(Batch, hidden, h, w)#先用contiguous断开连接，重新建立一个和x一样的数据；再重新排布。
+    return x, Batch#(3, 768, 14, 14)
 
 ACT2FN = {"gelu": torch.nn.functional.gelu, "relu": torch.nn.functional.relu, "swish": swish}
-
 
 class Attention(nn.Module):
     def __init__(self, config, vis):
@@ -121,51 +125,51 @@ class Mlp(nn.Module):
 
 class Embeddings(nn.Module):
     """Construct the embeddings from patch, position embeddings.
-    其为前面的CNN层以及Linear Projection操作
     """
     def __init__(self, config, img_size, in_channels=3):
         super(Embeddings, self).__init__()
         self.hybrid = None
         self.config = config
+        patchsize = config.patch_size# added 16 -> patchsize 
         img_size = _pair(img_size)
 
-        #通过是否由grid参数判断是否使用混合模型，即带有CNN的ViT
-        if config.patches.get("grid") is not None:   # ResNet
-            grid_size = config.patches["grid"]
-            patch_size = (img_size[0] // 16 // grid_size[0], img_size[1] // 16 // grid_size[1])
-            patch_size_real = (patch_size[0] * 16, patch_size[1] * 16)
-            n_patches = (img_size[0] // patch_size_real[0]) * (img_size[1] // patch_size_real[1])  
+        if config.patches.get("grid") is not None:   # ResNet  
+            grid_size = config.patches["grid"]# 16->(14,14) 8->(28,28) 32->(7,7)
+            patch_size = (img_size[0] // patchsize // grid_size[0], img_size[1] // patchsize // grid_size[1])# (1,1)
+            if np.any(patch_size == 0):
+                patch_size_real = (img_size[0] // grid_size[0], img_size[1] // grid_size[1])
+            else:
+                patch_size_real = (patch_size[0] * patchsize, patch_size[1] * patchsize)# (16,16)
+            n_patches = (img_size[0] // patch_size_real[0]) * (img_size[1] // patch_size_real[1])  # 196
             self.hybrid = True
         else:
             patch_size = _pair(config.patches["size"])
             n_patches = (img_size[0] // patch_size[0]) * (img_size[1] // patch_size[1])
             self.hybrid = False
 
-        #若使用混合模型，采用ResNetV2作为CNN网络
         if self.hybrid:
             self.hybrid_model = ResNetV2(block_units=config.resnet.num_layers, width_factor=config.resnet.width_factor)
-            in_channels = self.hybrid_model.width * 16
-        #采用卷积作为Linear Projection，使得其匹配hidden_size
+            in_channels = self.hybrid_model.width * 16  #1024
         self.patch_embeddings = Conv2d(in_channels=in_channels,
                                        out_channels=config.hidden_size,
                                        kernel_size=patch_size,
                                        stride=patch_size)
-        self.position_embeddings = nn.Parameter(torch.zeros(1, n_patches, config.hidden_size))
+        self.position_embeddings = nn.Parameter(torch.zeros(1, n_patches, config.hidden_size)) #(1, 196, 768)添加一个可优化的Tensor参量，增加模型的可变参数。
 
         self.dropout = Dropout(config.transformer["dropout_rate"])
 
 
     def forward(self, x):
         if self.hybrid:
-            x, features = self.hybrid_model(x)
+            x, features = self.hybrid_model(x)#list([(3,512,28,28),(3,256,56,56),(3,64,112,112)])
         else:
             features = None
-        x = self.patch_embeddings(x)  # (B, hidden. n_patches^(1/2), n_patches^(1/2))
-        x = x.flatten(2)
-        x = x.transpose(-1, -2)  # (B, n_patches, hidden)
+        x = self.patch_embeddings(x)  # (B, hidden. n_patches^(1/2), n_patches^(1/2)) (3,768,14,14)
+        x = x.flatten(2)#(3,768,196)
+        x = x.transpose(-1, -2)  # (B, n_patches, hidden) (3,196,768)
 
-        embeddings = x + self.position_embeddings
-        embeddings = self.dropout(embeddings)
+        embeddings = x + self.position_embeddings# (3,196,768)
+        embeddings = self.dropout(embeddings)# (3,196,768)
         return embeddings, features
 
 
@@ -228,28 +232,46 @@ class Block(nn.Module):
             self.ffn_norm.bias.copy_(np2th(weights[pjoin(ROOT, MLP_NORM, "bias")]))
 
 
-class Encoder(nn.Module):
-    '''
-    实际为Transformer结构
-    Transformer过程中不改变hidden_states的结构
-    '''
+class Encoder(nn.Module):#Transformer过程中不改变hidden_states的结构
     def __init__(self, config, vis):
         super(Encoder, self).__init__()
         self.vis = vis
         self.layer = nn.ModuleList()
+        self.conv_norm = nn.ModuleList()
         self.encoder_norm = LayerNorm(config.hidden_size, eps=1e-6)
-        for _ in range(config.transformer["num_layers"]):#12层Transformer
+        for _ in range(3):# 添加3层将Transformer转为(3,512,14,14)的数据
+            pw = int(math.pow(2,3-_))
+            layer = Conv2dReLU(
+                config.hidden_size,#768
+                512*pw,#512
+                kernel_size=3,
+                padding=1,
+                use_batchnorm=True,
+            )
+            self.conv_norm.append(copy.deepcopy(layer))
+        for _ in range(config.transformer["num_layers"]):# 12层Transformer
             layer = Block(config, vis)
             self.layer.append(copy.deepcopy(layer))
 
     def forward(self, hidden_states):
         attn_weights = []
-        for layer_block in self.layer:
-            hidden_states, weights = layer_block(hidden_states)
+        hidden_features = []
+        for i, layer_block in enumerate(self.layer):
+            hidden_states, weights = layer_block(hidden_states)#(3,196,768)
             if self.vis:
                 attn_weights.append(weights)
-        encoded = self.encoder_norm(hidden_states)
-        return encoded, attn_weights
+            
+            if i == 11:
+                hidden_features.append(None)
+            elif i % 3 == 2 : #每3个Transformer取出一个feature，只取到3，6，9层输出
+                pw = math.pow(2,int((i+1)/3))
+                hidden_feature, Batch= ReShape_new(hidden_states)#将feature转换为(3,768,14,14)的形式
+                hidden_feature = self.conv_norm[i//3](hidden_feature)#将feature转换为(3,512*8,14,14),(3,512*4,14,14),(3,512*2,14,14)的形式
+                hidden_feature = hidden_feature.contiguous().view(Batch, int(32*pw), int(224/pw), int(224/pw))
+                hidden_features.append(hidden_feature)#转变为对应形式，最后与decoder的cat()或相加
+                
+        encoded = self.encoder_norm(hidden_states)#(3,196,768)
+        return encoded, attn_weights, hidden_features[::-1]#list[None,(3,256,28,28),(3,126,56,56),(3,256,114,114)]
 
 
 class Transformer(nn.Module):
@@ -260,8 +282,8 @@ class Transformer(nn.Module):
 
     def forward(self, input_ids):
         embedding_output, features = self.embeddings(input_ids)
-        encoded, attn_weights = self.encoder(embedding_output)  # (B, n_patch, hidden)
-        return encoded, attn_weights, features
+        encoded, attn_weights, trans_skip = self.encoder(embedding_output)  # (B, n_patch, hidden)
+        return encoded, attn_weights, features, trans_skip #trans_skip -> list[None,(3,256,28,28),(3,126,56,56),(3,256,114,114)]
 
 
 class Conv2dReLU(nn.Sequential):
@@ -282,10 +304,10 @@ class Conv2dReLU(nn.Sequential):
             padding=padding,
             bias=not (use_batchnorm),
         )
-        relu = nn.ReLU(inplace=True)
-
+        
         bn = nn.BatchNorm2d(out_channels)
 
+        relu = nn.ReLU(inplace=True)
         super(Conv2dReLU, self).__init__(conv, bn, relu)
 
 
@@ -312,21 +334,23 @@ class DecoderBlock(nn.Module):
             padding=1,
             use_batchnorm=use_batchnorm,
         )
-        self.up = nn.UpsamplingBilinear2d(scale_factor=2)
+        #self.up = nn.UpsamplingBilinear2d(scale_factor=2)
+        self.norm = nn.BatchNorm2d(in_channels,)
 
     def forward(self, x, skip=None):
-        x = self.up(x)#输入图像的h,w总是decoder_channel的二分之一，需要先上采样
-        if skip is not None:#实现skip_connection
-            x = torch.cat([x, skip], dim=1)#在dim1连接在一起(B,1024,28,28) (B,512,56,56) (B,192,112,112)
-        x = self.conv1(x)#(B,256,28,28) (B,128,56,56) (B,64,112,112)
-        x = self.conv2(x)#(B,256,28,28) (B,128,56,56) (B,64,112,112)
+        #x = self.up(x)#上采样h,w先扩展一倍b1(3,512,28,28) b3(3,128,112,112)
+        x = self.norm(x)
+        if skip is not None:
+            x = torch.cat([x, skip], dim=1)#在dim1连接在一起b1(3,1024,28,28) b3(3,192,112,112)
+        x = self.conv1(x)#(3,256,28,28) (3,64,112,112)
+        x = self.conv2(x)#(3,256,28,28) (3,64,112,112)
         return x
 
 
 class SegmentationHead(nn.Sequential):
 
     def __init__(self, in_channels, out_channels, kernel_size=3, upsampling=1):
-        conv2d = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=kernel_size // 2)
+        conv2d = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=kernel_size // 2)#16,9,3
         upsampling = nn.UpsamplingBilinear2d(scale_factor=upsampling) if upsampling > 1 else nn.Identity()
         super().__init__(conv2d, upsampling)
 
@@ -337,18 +361,18 @@ class DecoderCup(nn.Module):
         self.config = config
         head_channels = 512
         self.conv_more = Conv2dReLU( #3x3的卷积
-            config.hidden_size,
-            head_channels,
+            config.hidden_size,#768
+            head_channels,#512
             kernel_size=3,
             padding=1,
             use_batchnorm=True,
         )
         decoder_channels = config.decoder_channels#(256, 128, 64, 16)
         in_channels = [head_channels] + list(decoder_channels[:-1])#(512, 256, 128, 64)
-        out_channels = decoder_channels#(256, 128, 64, 16)
+        out_channels = decoder_channels #(256, 128, 64, 16)
 
         if self.config.n_skip != 0:
-            skip_channels = self.config.skip_channels
+            skip_channels = self.config.skip_channels#(512,256,64)
             for i in range(4-self.config.n_skip):  # re-select the skip channels according to n_skip
                 skip_channels[3-i]=0
 
@@ -360,45 +384,67 @@ class DecoderCup(nn.Module):
         ]
         self.blocks = nn.ModuleList(blocks)
 
-        self.up = nn.UpsamplingBilinear2d((14,14))
+        up_blocks = [
+            nn.UpsamplingBilinear2d(size=(28,28)),
+            nn.UpsamplingBilinear2d(size=(56,56)),
+            nn.UpsamplingBilinear2d(size=(112,112)),
+            nn.UpsamplingBilinear2d(size=(224,224)),
+        ]
+        self.up = nn.ModuleList(up_blocks)
+        
 
-    def forward(self, hidden_states, features=None):
-        #reshape操作，将图像从(B,196,786)转化为(B,786,14,14)
-        B, n_patch, hidden = hidden_states.size()  # reshape from (B, n_patch, hidden) to (B, h, w, hidden)
+    def forward(self, hidden_states, features=None, trans_features=None):# n_patch = (H x W)/(P x P)
+        B, n_patch, hidden = hidden_states.size()  # reshape from (B(Batch_size), n_patch, hidden(D in paper)) to (B, h, w, hidden)
         h, w = int(np.sqrt(n_patch)), int(np.sqrt(n_patch))
-        x = hidden_states.permute(0, 2, 1)
-        x = x.contiguous().view(B, hidden, h, w)#(3,512,14,14)
-        x = self.conv_more(x)#卷积将图像channel缩小到512
-        if h < 14:#当patch_size = 32时，h会缩小到7，使得之后的卷积无法将图像恢复到224x224#因此使用上采样放大图像。
-            x = self.up(x)
+        x = hidden_states.permute(0, 2, 1)#维度转换 (B, n_patch, hidden) -> (B, hidden, n_patch)
+        x = x.contiguous().view(B, hidden, h, w)#先用contiguous断开连接，重新建立一个和x一样的数据；再重新排布。(3,768,14,14)
+        x = self.conv_more(x)#(3,512,14,14)
+        
         for i, decoder_block in enumerate(self.blocks):# 4个blocks，最后一个blocks没有skip
             #此处有两层判断：
             if features is not None:#按照feature判断
-                skip = features[i] if (i < self.config.n_skip) else None #根据n_skip判断连接数量
+                skip = features[i] if (i < self.config.n_skip) else None #按照skip的个数判断
             else:
                 skip = None
+            
+            if trans_features is not None:
+                trans_skip = trans_features[i] if (i < self.config.n_skip_trans) else None #按照skip的个数判断
+            else:
+                trans_skip = None
+            '''
+            注意 x = torch.cat([x, trans_skip],dim=2) 在训练中存在较好效果，此处注释掉仅为了实验其他结构
+            总结时可以新建一个文件保存此结构
+            '''
+            if trans_skip is not None:
+                #x = torch.cat([x, trans_skip],dim=2) #150_n_trans_skip1效果较好
+                x = x + trans_skip
+            x = self.up[i](x)#上采样，同时删除Block中的上采样
             x = decoder_block(x, skip=skip)
             '''
             i=0  x = (3,512,14,14) skip = (3,512,28,28)
-            i=1  x = (3,256,28,28) skip = (3,256,56,56)
-            i=2  x = (3,128,56,56) skip = (3,64,112,112)
-            i=3  x = (3,64,112,112) skip = None
+            i=2  x = (3,256,28,28) skip = (3,256,56,56)
+            i=3  x = (3,128,56,56) skip = (3,64,112,112)
+            i=4  x = (3,64,112,112) skip = None
             '''
-        return x
+        return x #(3,16,224,224)
 
 
-class VisionTransformer(nn.Module):
-    r'''
-    整个TransUnet的主结构,其使用了ViT的代码作为encoder部分,并自行编写了decoder结构
+
+class VisionTransformer_New(nn.Module):
+    '''
+    此为自己对论文结构的修改形成的网络
+    在Transformer结构中,每隔3个建立新的skip_connection
+    初始时将3个skip连接到
     '''
     def __init__(self, config, img_size=224, num_classes=21843, zero_head=False, vis=False):
-        super(VisionTransformer, self).__init__()
-        self.num_classes = num_classes
-        self.zero_head = zero_head
-        self.classifier = config.classifier
-        self.transformer = Transformer(config, img_size, vis) #论文中整个Encoder部分
-        self.decoder = DecoderCup(config) #整个decoder部分
-        self.segmentation_head = SegmentationHead( #最后的segmentation head
+        super(VisionTransformer_New, self).__init__()
+        self.num_classes = num_classes # 9
+        self.zero_head = zero_head     # False
+        self.classifier = config.classifier # 'seg'
+
+        self.transformer = Transformer(config, img_size, vis)#Encoder
+        self.decoder = DecoderCup(config)
+        self.segmentation_head = SegmentationHead(
             in_channels=config['decoder_channels'][-1],
             out_channels=config['n_classes'],
             kernel_size=3,
@@ -408,11 +454,10 @@ class VisionTransformer(nn.Module):
     def forward(self, x):
         if x.size()[1] == 1:
             x = x.repeat(1,3,1,1)
-        x, attn_weights, features = self.transformer(x)  # (B, n_patch, hidden)
-                            #feature即为对应的skip_connection
-        x = self.decoder(x, features)
+        x, attn_weights, features, trans_features = self.transformer(x)  # (B, n_patch, hidden)
+        x = self.decoder(x, features, trans_features)
         logits = self.segmentation_head(x)
-        return logits
+        return logits#(3,9,224,224)
 
     def load_from(self, weights):
         with torch.no_grad():
@@ -449,6 +494,8 @@ class VisionTransformer(nn.Module):
 
             # Encoder whole
             for bname, block in self.transformer.encoder.named_children():
+                if bname == 'conv_norm':#加载pretrained模型时，由于新添加了模型结构，该部分没有对应权重，需要忽略
+                    continue
                 for uname, unit in block.named_children():
                     unit.load_from(weights, n_block=uname)
 
@@ -463,14 +510,15 @@ class VisionTransformer(nn.Module):
                     for uname, unit in block.named_children():
                         unit.load_from(res_weight, n_block=bname, n_unit=uname)
 
+
 CONFIGS = {
-    'ViT-B_16': configs.get_b16_config(),#Runnable n_skip=0
-    'ViT-B_32': configs.get_b32_config(),#Runnable n_skip=0
-    'ViT-L_16': configs.get_l16_config(),#Runnable n_skip=0
-    'ViT-L_32': configs.get_l32_config(),#pretrained模型参数不匹配
+    'ViT-B_16': configs.get_b16_config(),
+    'ViT-B_32': configs.get_b32_config(),
+    'ViT-L_16': configs.get_l16_config(),
+    'ViT-L_32': configs.get_l32_config(),
     'ViT-H_14': configs.get_h14_config(),
-    'R50-ViT-B_16': configs.get_r50_b16_config(),#Runnable n_skip=0
-    'R50-ViT-L_16': configs.get_r50_l16_config(),#pretrained模型参数不匹配
+    'R50-ViT-B_16': configs.get_r50_b16_config(),
+    'R50-ViT-L_16': configs.get_r50_l16_config(),
     'testing': configs.get_testing(),
 }
 

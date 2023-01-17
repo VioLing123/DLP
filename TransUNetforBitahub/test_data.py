@@ -12,6 +12,7 @@ from datasets.dataset_synapse import Synapse_dataset
 from utils import test_single_volume
 from networks.vit_seg_modeling import VisionTransformer as ViT_seg
 from networks.vit_seg_modeling import CONFIGS as CONFIGS_ViT_seg
+from networks.vit_seg_modeling_add import VisionTransformer_None as ViT_seg_None
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--volume_path', type=str,#测试集文件位置
@@ -25,18 +26,19 @@ parser.add_argument('--list_dir', type=str,
 
 parser.add_argument('--max_iterations', type=int,default=20000, help='maximum epoch number to train')
 parser.add_argument('--max_epochs', type=int, default=150, help='maximum epoch number to train')
-parser.add_argument('--batch_size', type=int, default=24,help='batch_size per gpu')
+parser.add_argument('--batch_size', type=int, default=12,help='batch_size per gpu')
 parser.add_argument('--img_size', type=int, default=224, help='input patch size of network input')
 parser.add_argument('--is_savenii', action="store_true", help='whether to save results during inference')#是否保存nii图像
 
-parser.add_argument('--n_skip', type=int, default=3, help='using number of skip-connect, default is num')
-parser.add_argument('--vit_name', type=str, default='R50-ViT-B_16', help='select one vit model')#应当使用R50-ViT_B_16
+parser.add_argument('--n_skip', type=int, default=0, help='using number of skip-connect, default is num')
+parser.add_argument('--vit_name', type=str, default='ViT-L_16', help='select one vit model')#应当使用R50-ViT_B_16
 
 parser.add_argument('--test_save_dir', type=str, default='../output', help='saving prediction as nii!')#设置文件输出位置
 parser.add_argument('--deterministic', type=int,  default=1, help='whether use deterministic training')
 parser.add_argument('--base_lr', type=float,  default=0.01, help='segmentation network learning rate')
 parser.add_argument('--seed', type=int, default=1234, help='random seed')
 parser.add_argument('--vit_patches_size', type=int, default=16, help='vit_patches_size, default is 16')
+parser.add_argument('--decoder', type=str, default='CUP', help='whether use CUP decoder')
 args = parser.parse_args()
 
 
@@ -97,6 +99,9 @@ if __name__ == "__main__":
 
     args.is_pretrain = True
 
+    if args.batch_size != 24 and args.batch_size % 6 == 0:
+        args.base_lr *= args.batch_size / 24
+
     # name the same snapshot defined in train script!
     args.exp = 'TU_' + dataset_name + str(args.img_size)
     snapshot_path = "../output/{}/{}".format(args.exp, 'TU')
@@ -120,17 +125,23 @@ if __name__ == "__main__":
     config_vit.n_classes = args.num_classes
     config_vit.n_skip = args.n_skip
     config_vit.patches.size = (args.vit_patches_size, args.vit_patches_size)
-    if args.vit_name.find('R50') !=-1:
+    if args.vit_name.find('R50') !=-1 and args.decoder == 'CUP':
         config_vit.patches.grid = (int(args.img_size/args.vit_patches_size), int(args.img_size/args.vit_patches_size))
 
-    net = ViT_seg(config_vit, img_size=args.img_size, num_classes=config_vit.n_classes).cuda()
+    if args.decoder == 'CUP':
+        net = ViT_seg(config_vit, img_size=args.img_size, num_classes=config_vit.n_classes).cuda()
+    else:
+        net = ViT_seg_None(config_vit, img_size=args.img_size, num_classes=config_vit.n_classes).cuda()
 
     snapshot = os.path.join(snapshot_path, 'best_model.pth')
     if not os.path.exists(snapshot): 
         snapshot = snapshot.replace('best_model', 'epoch_'+str(args.max_epochs-1))
 
     #added by wyl
-    snapshot= '../model/VioLin/TU_Synapse224/pre15024224/epoch_149.pth'
+    if args.base_lr == 0.01:
+        snapshot = '../model/VioLin/TU_Synapse224/pre15024224/epoch_149.pth'
+    elif args.base_lr == 0.005:
+        snapshot = '../model/TU_Synapse224/87420.pth'
 
     net.load_state_dict(torch.load(snapshot))
     snapshot_name = snapshot_path.split('/')[-1]
