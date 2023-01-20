@@ -11,6 +11,7 @@ from networks.vit_seg_modeling_add import VisionTransformer_None as ViT_seg_None
 from networks.vit_seg_modeling_add import VisionTransformer_1SkipinPaper as ViT_seg_Skip1
 from networks.vit_seg_modeling_new import VisionTransformer_New as ViT_seg_New
 from networks.vit_seg_modeling_new1 import VisionTransformer_New1 as ViT_seg_New1
+from networks.vit_seg_modeling_new2 import VisionTransformer_New2 as ViT_seg_New2
 
 from trainer import trainer_synapse
 
@@ -47,6 +48,7 @@ parser.add_argument('--vit_name', type=str,
 parser.add_argument('--vit_patches_size', type=int,
                     default=16, help='vit_patches_size, default is 16')
 parser.add_argument('--decoder', type=str, default='CUP', help='whether use CUP decoder')
+parser.add_argument('--con_form', type=str, default='Cat', help='the way that trans_skip connect with x')
 args = parser.parse_args()
 
 
@@ -103,22 +105,29 @@ if __name__ == "__main__":
     if not os.path.exists(snapshot_path):
         os.makedirs(snapshot_path)
     
-    #设置pre_trained model
+    
+    '''
+    设置pre_trained model
+    依据对应的训练网络，设置对应的预训练模型
+    '''
     # （默认为R50+ViT-B_16,注意vit_name为R50-ViT-B_16,要与CONFIGS_ViT_seg中字典key相同）
     config_vit = CONFIGS_ViT_seg[args.vit_name]
     config_vit.n_classes = args.num_classes
-    config_vit.n_skip = args.n_skip
-    config_vit.n_skip_trans = args.n_skip_trans
-    if args.vit_name.find('R50') != -1 and (args.decoder == 'CUP' or args.decoder == 'NEW' or args.decoder == 'Skip1' or args.decoder == 'NEW1'): #没找到就返回 -1
+    config_vit.n_skip = args.n_skip #TransUnet中skip的数量
+    config_vit.n_skip_trans = args.n_skip_trans #New中Trans_skip的数量
+    config_vit.connect_form = args.con_form #New中Trans_skip与x的连接方式
+    if args.vit_name.find('R50') != -1 and (args.decoder == 'CUP' or args.decoder == 'NEW' or args.decoder == 'Skip1' or args.decoder == 'NEW1' or args.decoder == 'NEW2'): #没找到就返回 -1
         config_vit.patches.grid = (int(args.img_size / args.vit_patches_size), int(args.img_size / args.vit_patches_size))#使用R50时，将对grid进行修改
 
     #创建模型网络
     if args.decoder == 'CUP':#使用论文中的CUP结构
         net = ViT_seg(config_vit, img_size=args.img_size, num_classes=config_vit.n_classes).cuda()
-    elif args.decoder == 'NEW':#使用自己改进的模型
+    elif args.decoder == 'NEW':#使用自己改进的skip-connection模型
         net = ViT_seg_New(config_vit, img_size=args.img_size, num_classes=config_vit.n_classes).cuda()
     elif args.decoder == 'NEW1':#结合Unet将decoder中的upsampling改为conv的形式。其中没有NEW中的trans_skip
         net = ViT_seg_New1(config_vit, img_size=args.img_size, num_classes=config_vit.n_classes).cuda()
+    elif args.decoder == 'NEW2':#结合Unet将decoder中的upsampling改为conv的形式。其中没有NEW中的trans_skip
+        net = ViT_seg_New2(config_vit, img_size=args.img_size, num_classes=config_vit.n_classes).cuda()
     elif args.decoder == 'Skip1':#复现论文中1skip的情况
         net = ViT_seg_Skip1(config_vit, img_size=args.img_size, num_classes=config_vit.n_classes).cuda()        
     else:#复现论文中decoder使用None的结构
