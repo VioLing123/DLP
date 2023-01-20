@@ -2,7 +2,6 @@
 
 '''
 该页为实现论文中的Analytical Study而进行的结构调整
-
 '''
 
 from __future__ import absolute_import
@@ -31,7 +30,10 @@ FC_1 = "MlpBlock_3/Dense_1/"
 ATTENTION_NORM = "LayerNorm_0/"
 MLP_NORM = "LayerNorm_2/"
 
+
 def ReShape(hidden_states):# n_patch = (H x W)/(P x P)
+    '''从原结构中提取的Reshape操作
+    '''
     Batch, n_patch, hidden = hidden_states.size()  # reshape from (B(Batch_size), n_patch, hidden(D in paper)) to (B, h, w, hidden)
     h, w = int(np.sqrt(n_patch)), int(np.sqrt(n_patch))
     x = hidden_states.permute(0, 2, 1)#维度转换 (B, n_patch, hidden) -> (B, hidden, n_patch)
@@ -39,6 +41,12 @@ def ReShape(hidden_states):# n_patch = (H x W)/(P x P)
     return x
 
 class Decoder_None(nn.Module):
+    '''依据原论文复现的Decoder的None结构
+    具体做法:
+            1.将transformer的输出从196先reshape到14x14,
+            2.再通过一个1x1的卷积将通道数缩减到类数目,
+            3.接着直接上采样到图片分辨率(224x224)
+    '''
     def __init__(self, config) -> None:
         super(Decoder_None, self).__init__()
         self.conv1 = Conv2dReLU(
@@ -176,6 +184,8 @@ class SegmentationHead(nn.Sequential):
 
 
 class DecoderCup_skip1(nn.Module):
+    '''复现论文中1-skip在1/4分辨率处的情况
+    '''
     def __init__(self, config):
         super().__init__()
         self.config = config

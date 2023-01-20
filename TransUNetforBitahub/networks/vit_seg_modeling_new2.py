@@ -405,7 +405,7 @@ class DecoderCup_mix(nn.Module):
             
             if trans_features is not None:
                 trans_skip = trans_features[i] if (i < self.config.n_skip_trans) else None #按照skip的个数判断
-                #trans_skip = trans_features[i] if (i == 1) else None#是否按照论文中建立1-skip需要自行修改
+                #trans_skip = trans_features[i] if (i == 1) else None #该方式为实现论文中的1-skip情况(1skipinPaper)，探究时自行设置，手动修改
             else:
                 trans_skip = None
 

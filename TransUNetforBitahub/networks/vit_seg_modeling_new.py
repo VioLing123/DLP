@@ -130,7 +130,7 @@ class Embeddings(nn.Module):
         super(Embeddings, self).__init__()
         self.hybrid = None
         self.config = config
-        patchsize = config.patch_size# added 16 -> patchsize 
+        patchsize = 16# added 16 -> patchsize 
         img_size = _pair(img_size)
 
         if config.patches.get("grid") is not None:   # ResNet  
@@ -335,7 +335,7 @@ class DecoderBlock(nn.Module):
             use_batchnorm=use_batchnorm,
         )
         #self.up = nn.UpsamplingBilinear2d(scale_factor=2)
-        self.norm = nn.BatchNorm2d(in_channels,)
+        self.norm = nn.BatchNorm2d(in_channels,)#默认在上采样后进行归一化操作，探究时可以手动注释
 
     def forward(self, x, skip=None):
         #x = self.up(x)#上采样h,w先扩展一倍b1(3,512,28,28) b3(3,128,112,112)
@@ -355,7 +355,10 @@ class SegmentationHead(nn.Sequential):
         super().__init__(conv2d, upsampling)
 
 
-class DecoderCup(nn.Module):
+class DecoderCup_cat(nn.Module):
+    '''
+    在Decoder层用torch.cat的方式连接Transformer与x连接
+    '''
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -409,6 +412,7 @@ class DecoderCup(nn.Module):
             
             if trans_features is not None:
                 trans_skip = trans_features[i] if (i < self.config.n_skip_trans) else None #按照skip的个数判断
+                #trans_skip = trans_features[i] if (i == 1 ) else None #该方式为实现论文中的1-skip情况(1skipinPaper)，探究时自行设置，手动修改
             else:
                 trans_skip = None
             '''
@@ -416,7 +420,79 @@ class DecoderCup(nn.Module):
             总结时可以新建一个文件保存此结构
             '''
             if trans_skip is not None:
-                #x = torch.cat([x, trans_skip],dim=2) #150_n_trans_skip1效果较好
+                x = torch.cat([x, trans_skip],dim=2) #150_n_trans_skip1效果较好
+            x = self.up[i](x)#上采样，同时删除Block中的上采样
+            x = decoder_block(x, skip=skip)
+            '''
+            i=0  x = (3,512,14,14) skip = (3,512,28,28)
+            i=2  x = (3,256,28,28) skip = (3,256,56,56)
+            i=3  x = (3,128,56,56) skip = (3,64,112,112)
+            i=4  x = (3,64,112,112) skip = None
+            '''
+        return x #(3,16,224,224)
+
+class DecoderCup_add(nn.Module):
+    '''
+    在Decoder层用tensor相加的方式连接Transformer与x连接
+    '''
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        head_channels = 512
+        self.conv_more = Conv2dReLU( #3x3的卷积
+            config.hidden_size,#768
+            head_channels,#512
+            kernel_size=3,
+            padding=1,
+            use_batchnorm=True,
+        )
+        decoder_channels = config.decoder_channels#(256, 128, 64, 16)
+        in_channels = [head_channels] + list(decoder_channels[:-1])#(512, 256, 128, 64)
+        out_channels = decoder_channels #(256, 128, 64, 16)
+
+        if self.config.n_skip != 0:
+            skip_channels = self.config.skip_channels#(512,256,64)
+            for i in range(4-self.config.n_skip):  # re-select the skip channels according to n_skip
+                skip_channels[3-i]=0
+
+        else:
+            skip_channels=[0,0,0,0]
+
+        blocks = [
+            DecoderBlock(in_ch, out_ch, sk_ch) for in_ch, out_ch, sk_ch in zip(in_channels, out_channels, skip_channels)
+        ]
+        self.blocks = nn.ModuleList(blocks)
+
+        up_blocks = [
+            nn.UpsamplingBilinear2d(size=(28,28)),
+            nn.UpsamplingBilinear2d(size=(56,56)),
+            nn.UpsamplingBilinear2d(size=(112,112)),
+            nn.UpsamplingBilinear2d(size=(224,224)),
+        ]
+        self.up = nn.ModuleList(up_blocks)
+        
+
+    def forward(self, hidden_states, features=None, trans_features=None):# n_patch = (H x W)/(P x P)
+        B, n_patch, hidden = hidden_states.size()  # reshape from (B(Batch_size), n_patch, hidden(D in paper)) to (B, h, w, hidden)
+        h, w = int(np.sqrt(n_patch)), int(np.sqrt(n_patch))
+        x = hidden_states.permute(0, 2, 1)#维度转换 (B, n_patch, hidden) -> (B, hidden, n_patch)
+        x = x.contiguous().view(B, hidden, h, w)#先用contiguous断开连接，重新建立一个和x一样的数据；再重新排布。(3,768,14,14)
+        x = self.conv_more(x)#(3,512,14,14)
+        
+        for i, decoder_block in enumerate(self.blocks):# 4个blocks，最后一个blocks没有skip
+            #此处有两层判断：
+            if features is not None:#按照feature判断
+                skip = features[i] if (i < self.config.n_skip) else None #按照skip的个数判断
+            else:
+                skip = None
+            
+            if trans_features is not None:
+                trans_skip = trans_features[i] if (i < self.config.n_skip_trans) else None #按照skip的个数判断
+                #trans_skip = trans_features[i] if (i == 1 ) else None #该方式为实现论文中的1-skip情况(1skipinPaper)，探究时自行设置，手动修改
+            else:
+                trans_skip = None
+
+            if trans_skip is not None:
                 x = x + trans_skip
             x = self.up[i](x)#上采样，同时删除Block中的上采样
             x = decoder_block(x, skip=skip)
@@ -443,7 +519,10 @@ class VisionTransformer_New(nn.Module):
         self.classifier = config.classifier # 'seg'
 
         self.transformer = Transformer(config, img_size, vis)#Encoder
-        self.decoder = DecoderCup(config)
+        if config.connect_form == 'Add':
+            self.decoder = DecoderCup_add(config)
+        else:
+            self.decoder = DecoderCup_cat(config)
         self.segmentation_head = SegmentationHead(
             in_channels=config['decoder_channels'][-1],
             out_channels=config['n_classes'],
@@ -494,7 +573,7 @@ class VisionTransformer_New(nn.Module):
 
             # Encoder whole
             for bname, block in self.transformer.encoder.named_children():
-                if bname == 'conv_norm':#加载pretrained模型时，由于新添加了模型结构，该部分没有对应权重，需要忽略
+                if bname == 'conv_norm': #加载pretrained模型时，由于新添加了模型结构，该部分没有对应权重，需要忽略
                     continue
                 for uname, unit in block.named_children():
                     unit.load_from(weights, n_block=uname)

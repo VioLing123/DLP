@@ -308,13 +308,13 @@ class DecoderBlock(nn.Module):
             padding=1,
             use_batchnorm=use_batchnorm,
         )
-        self.up = nn.UpsamplingBilinear2d(scale_factor=2)
+        #self.up = nn.UpsamplingBilinear2d(scale_factor=2)
         
         self.up = nn.ConvTranspose2d(
             in_channels, in_channels, stride = 2, 
             kernel_size = 3, padding = 1, output_padding = 1, bias = True
             )
-        self.up_relu = nn.ReLU()
+        self.up_relu = nn.ReLU()#上采样使用了ConvTranspose2d + ReLU的形式，探究时可手动注释掉ReLU观察区别
 
     def forward(self, x, skip=None):
         x = self.up(x)#先扩展一倍block1(3,512,28,28) block3(3,128,112,112)
