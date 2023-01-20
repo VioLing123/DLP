@@ -73,13 +73,15 @@ h5py
 
 ##### 4.2.1 The number of skip-connections：
 
-> 0-skip(即R50-ViT+CUP)：`--vit_name R50-ViT-B_16 --n_skip 0`
->
-> 1-skip(1/4分辨率处)：`--decoder Skip1`
->
-> 1-skip(1/8分辨率处)：`--n_skip 1`
->
-> 3-skip(即TransUnet)：`--vit_name R50-ViT-B_16 --n_skip 3`
+- 参数设置：
+
+  > 0-skip(即R50-ViT+CUP)：`--vit_name R50-ViT-B_16 --n_skip 0`
+  >
+  > 1-skip(1/4分辨率处)：`--decoder Skip1`
+  >
+  > 1-skip(1/8分辨率处)：`--n_skip 1`
+  >
+  > 3-skip(即TransUnet)：`--vit_name R50-ViT-B_16 --n_skip 3`
 
 *复现结果：*
 
