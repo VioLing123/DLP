@@ -6,57 +6,45 @@ import sys
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
-import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from datasets.dataset_synapse import Synapse_dataset
 from utils import test_single_volume
 from networks.vit_seg_modeling import VisionTransformer as ViT_seg
 from networks.vit_seg_modeling import CONFIGS as CONFIGS_ViT_seg
-
 from networks.vit_seg_modeling_add import VisionTransformer_None as ViT_seg_None
-from networks.vit_seg_modeling_add import VisionTransformer_1SkipinPaper as ViT_seg_Skip1
-from networks.vit_seg_modeling_new import VisionTransformer_New as ViT_seg_New
-from networks.vit_seg_modeling_new1 import VisionTransformer_New1 as ViT_seg_New1
-
-'''
-注意与train不同的是，如果修改了patch_size,在test中需要手动将对应参数args.vit_patches_size设为对应值
-'''
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--volume_path', type=str,#测试集文件位置
-                    default='../data/Synapse/test_vol_h5', help='root dir for validation volume data')  # for acdc volume_path=root_dir
+                    default='../data/VioLin/Synapse/test_vol_h5', help='root dir for validation volume data')  # for acdc volume_path=root_dir
 parser.add_argument('--dataset', type=str,
                     default='Synapse', help='experiment_name')
 parser.add_argument('--num_classes', type=int,
-                    default=4, help='output channel of network')
+                    default=9, help='output channel of network')
 parser.add_argument('--list_dir', type=str,
                     default='./lists/lists_Synapse', help='list dir')
 
 parser.add_argument('--max_iterations', type=int,default=20000, help='maximum epoch number to train')
-parser.add_argument('--max_epochs', type=int, default=30, help='maximum epoch number to train')
-parser.add_argument('--batch_size', type=int, default=24,help='batch_size per gpu')
+parser.add_argument('--max_epochs', type=int, default=150, help='maximum epoch number to train')
+parser.add_argument('--batch_size', type=int, default=12,help='batch_size per gpu')
 parser.add_argument('--img_size', type=int, default=224, help='input patch size of network input')
-parser.add_argument('--is_savenii', action="store_true", help='whether to save results during inference')
+parser.add_argument('--is_savenii', action="store_true", help='whether to save results during inference')#是否保存nii图像
 
-parser.add_argument('--n_skip', type=int,
-                    default=3, help='using number of skip-connect in CNN, default is num')
-parser.add_argument('--n_skip_trans', type=int,
-                    default=2, help='using number of skip-connect in trans, default is num')
-parser.add_argument('--vit_name', type=str, default='ViT-B_16', help='select one vit model')#应当使用R50-ViT-B_16
+parser.add_argument('--n_skip', type=int, default=0, help='using number of skip-connect, default is num')
+parser.add_argument('--vit_name', type=str, default='ViT-B_32', help='select one vit model')#应当使用R50-ViT_B_16
 
-parser.add_argument('--test_save_dir', type=str, default='../predictions', help='saving prediction as nii!')
+parser.add_argument('--test_save_dir', type=str, default='../output', help='saving prediction as nii!')#设置文件输出位置
 parser.add_argument('--deterministic', type=int,  default=1, help='whether use deterministic training')
 parser.add_argument('--base_lr', type=float,  default=0.01, help='segmentation network learning rate')
 parser.add_argument('--seed', type=int, default=1234, help='random seed')
-parser.add_argument('--vit_patches_size', type=int, default=16, help='vit_patches_size, default is 16')
+parser.add_argument('--vit_patches_size', type=int, default=32, help='vit_patches_size, default is 16')
 parser.add_argument('--decoder', type=str, default='CUP', help='whether use CUP decoder')
 args = parser.parse_args()
 
 
 def inference(args, model, test_save_path=None):
     db_test = args.Dataset(base_dir=args.volume_path, split="test_vol", list_dir=args.list_dir)
-    testloader = DataLoader(db_test, batch_size=1, shuffle=False, num_workers=0)
+    testloader = DataLoader(db_test, batch_size=1, shuffle=False, num_workers=1)
     logging.info("{} test iterations per epoch".format(len(testloader)))
     model.eval()
     metric_list = 0.0
@@ -68,7 +56,7 @@ def inference(args, model, test_save_path=None):
         metric_list += np.array(metric_i)
         logging.info('idx %d case %s mean_dice %f mean_hd95 %f' % (i_batch, case_name, np.mean(metric_i, axis=0)[0], np.mean(metric_i, axis=0)[1]))
     metric_list = metric_list / len(db_test)
-    for i in range(1, args.num_classes):#每一个器官类的mean值
+    for i in range(1, args.num_classes):
         logging.info('Mean class %d mean_dice %f mean_hd95 %f' % (i, metric_list[i-1][0], metric_list[i-1][1]))
     performance = np.mean(metric_list, axis=0)[0]
     mean_hd95 = np.mean(metric_list, axis=0)[1]
@@ -111,9 +99,12 @@ if __name__ == "__main__":
 
     args.is_pretrain = True
 
+    if args.batch_size != 24 and args.batch_size % 6 == 0:
+        args.base_lr *= args.batch_size / 24
+
     # name the same snapshot defined in train script!
     args.exp = 'TU_' + dataset_name + str(args.img_size)
-    snapshot_path = "../model/{}/{}".format(args.exp, 'TU')
+    snapshot_path = "../output/{}/{}".format(args.exp, 'TU')
     snapshot_path = snapshot_path + '_pretrain' if args.is_pretrain else snapshot_path
     snapshot_path += '_' + args.vit_name
     snapshot_path = snapshot_path + '_skip' + str(args.n_skip)
@@ -126,26 +117,19 @@ if __name__ == "__main__":
     snapshot_path = snapshot_path + '_'+str(args.img_size)
     snapshot_path = snapshot_path + '_s'+str(args.seed) if args.seed!=1234 else snapshot_path
     #snapshot_path(训练快照保存位置)
+    #同样保存在../output文件夹下
 
     #设置pre_trained model
     # （我们使用R50+ViT-B_16,注意vit_name为R50-ViT-B_16,要与CONFIGS_ViT_seg中字典key相同）
     config_vit = CONFIGS_ViT_seg[args.vit_name]
     config_vit.n_classes = args.num_classes
     config_vit.n_skip = args.n_skip
-    config_vit.n_skip_trans = args.n_skip_trans
     config_vit.patches.size = (args.vit_patches_size, args.vit_patches_size)
-    if args.vit_name.find('R50') !=-1 and (args.decoder == 'CUP' or args.decoder == 'NEW'):
+    if args.vit_name.find('R50') !=-1 and args.decoder == 'CUP':
         config_vit.patches.grid = (int(args.img_size/args.vit_patches_size), int(args.img_size/args.vit_patches_size))
 
-    #创建模型网络
     if args.decoder == 'CUP':
         net = ViT_seg(config_vit, img_size=args.img_size, num_classes=config_vit.n_classes).cuda()
-    elif args.decoder == 'NEW':
-        net = ViT_seg_New(config_vit, img_size=args.img_size, num_classes=config_vit.n_classes).cuda()
-    elif args.decoder == 'NEW1':
-        net = ViT_seg_New1(config_vit, img_size=args.img_size, num_classes=config_vit.n_classes).cuda()
-    elif args.decoder == 'Skip1':
-        net = ViT_seg_Skip1(config_vit, img_size=args.img_size, num_classes=config_vit.n_classes).cuda()
     else:
         net = ViT_seg_None(config_vit, img_size=args.img_size, num_classes=config_vit.n_classes).cuda()
 
@@ -153,10 +137,17 @@ if __name__ == "__main__":
     if not os.path.exists(snapshot): 
         snapshot = snapshot.replace('best_model', 'epoch_'+str(args.max_epochs-1))
 
+    #added by wyl
+    if args.base_lr == 0.01:
+        snapshot = '../model/TU_Synapse224/pre15024224/epoch_149.pth'
+    elif args.base_lr == 0.005:
+        snapshot = '../model/TU_Synapse224/87420.pth'
+    snapshot = '../model/TU_Synapse224/87427.pth'
+
     net.load_state_dict(torch.load(snapshot))
     snapshot_name = snapshot_path.split('/')[-1]
 
-    log_folder = './test_log/test_log_' + args.exp
+    log_folder = '../output/test_log/test_log_' + args.exp
     os.makedirs(log_folder, exist_ok=True)
     logging.basicConfig(filename=log_folder + '/'+snapshot_name+".txt", level=logging.INFO, format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
@@ -164,12 +155,10 @@ if __name__ == "__main__":
     logging.info(snapshot_name)
 
     if args.is_savenii:
-        args.test_save_dir = '../predictions'
+        args.test_save_dir = '../output'
         test_save_path = os.path.join(args.test_save_dir, args.exp, snapshot_name)
         os.makedirs(test_save_path, exist_ok=True)
     else:
         test_save_path = None
         
     inference(args, net, test_save_path)
-
-

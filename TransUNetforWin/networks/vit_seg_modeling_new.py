@@ -19,7 +19,6 @@ from scipy import ndimage
 from . import vit_seg_configs as configs
 from .vit_seg_modeling_resnet_skip import ResNetV2
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -43,9 +42,14 @@ def np2th(weights, conv=False):
 def swish(x):
     return x * torch.sigmoid(x)
 
+def ReShape_new(hidden_states):# n_patch = (H x W)/(P x P) #(3, 196, 768)
+    Batch, n_patch, hidden = hidden_states.size()  # reshape from (B(Batch_size), n_patch, hidden(D in paper)) to (B, h, w, hidden)
+    h, w = int(np.sqrt(n_patch)), int(np.sqrt(n_patch))
+    x = hidden_states.permute(0, 2, 1)#维度转换 (B, n_patch, hidden) -> (B, hidden, n_patch)
+    x = x.contiguous().view(Batch, hidden, h, w)#先用contiguous断开连接，重新建立一个和x一样的数据；再重新排布。
+    return x, Batch#(3, 768, 14, 14)
 
 ACT2FN = {"gelu": torch.nn.functional.gelu, "relu": torch.nn.functional.relu, "swish": swish}
-
 
 class Attention(nn.Module):
     def __init__(self, config, vis):
@@ -126,7 +130,7 @@ class Embeddings(nn.Module):
         super(Embeddings, self).__init__()
         self.hybrid = None
         self.config = config
-        patchsize = 16#config.patch_size# added 16 -> patchsize 
+        patchsize = config.patch_size# added 16 -> patchsize 
         img_size = _pair(img_size)
 
         if config.patches.get("grid") is not None:   # ResNet  
@@ -135,8 +139,8 @@ class Embeddings(nn.Module):
             if np.any(patch_size == 0):
                 patch_size_real = (img_size[0] // grid_size[0], img_size[1] // grid_size[1])
             else:
-                patch_size_real = (patch_size[0] * patchsize, patch_size[1] * patchsize)# 16.(16,16) 8.(8,8)
-            n_patches = (img_size[0] // patch_size_real[0]) * (img_size[1] // patch_size_real[1])  # 16.196 8.784
+                patch_size_real = (patch_size[0] * patchsize, patch_size[1] * patchsize)# (16,16)
+            n_patches = (img_size[0] // patch_size_real[0]) * (img_size[1] // patch_size_real[1])  # 196
             self.hybrid = True
         else:
             patch_size = _pair(config.patches["size"])
@@ -145,7 +149,7 @@ class Embeddings(nn.Module):
 
         if self.hybrid:
             self.hybrid_model = ResNetV2(block_units=config.resnet.num_layers, width_factor=config.resnet.width_factor)
-            in_channels = self.hybrid_model.width * 16  #16.1024  8.1024
+            in_channels = self.hybrid_model.width * 16  #1024
         self.patch_embeddings = Conv2d(in_channels=in_channels,
                                        out_channels=config.hidden_size,
                                        kernel_size=patch_size,
@@ -158,9 +162,9 @@ class Embeddings(nn.Module):
     def forward(self, x):
         if self.hybrid:
             x, features = self.hybrid_model(x)#list([(3,512,28,28),(3,256,56,56),(3,64,112,112)])
-        else:#8.(1024,14,14)
+        else:
             features = None
-        x = self.patch_embeddings(x)  # (B, hidden, n_patches^(1/2), n_patches^(1/2)) (3,768,14,14)
+        x = self.patch_embeddings(x)  # (B, hidden. n_patches^(1/2), n_patches^(1/2)) (3,768,14,14)
         x = x.flatten(2)#(3,768,196)
         x = x.transpose(-1, -2)  # (B, n_patches, hidden) (3,196,768)
 
@@ -233,19 +237,41 @@ class Encoder(nn.Module):#Transformer过程中不改变hidden_states的结构
         super(Encoder, self).__init__()
         self.vis = vis
         self.layer = nn.ModuleList()
+        self.conv_norm = nn.ModuleList()
         self.encoder_norm = LayerNorm(config.hidden_size, eps=1e-6)
+        for _ in range(3):# 添加3层将Transformer转为(3,512,14,14)的数据
+            pw = int(math.pow(2,3-_))
+            layer = Conv2dReLU(
+                config.hidden_size,#768
+                512*pw,#512
+                kernel_size=3,
+                padding=1,
+                use_batchnorm=True,
+            )
+            self.conv_norm.append(copy.deepcopy(layer))
         for _ in range(config.transformer["num_layers"]):# 12层Transformer
             layer = Block(config, vis)
             self.layer.append(copy.deepcopy(layer))
 
     def forward(self, hidden_states):
         attn_weights = []
-        for layer_block in self.layer:
+        hidden_features = []
+        for i, layer_block in enumerate(self.layer):
             hidden_states, weights = layer_block(hidden_states)#(3,196,768)
             if self.vis:
                 attn_weights.append(weights)
+            
+            if i == 11:
+                hidden_features.append(None)
+            elif i % 3 == 2 : #每3个Transformer取出一个feature，只取到3，6，9层输出
+                pw = math.pow(2,int((i+1)/3))
+                hidden_feature, Batch= ReShape_new(hidden_states)#将feature转换为(3,768,14,14)的形式
+                hidden_feature = self.conv_norm[i//3](hidden_feature)#将feature转换为(3,512*8,14,14),(3,512*4,14,14),(3,512*2,14,14)的形式
+                hidden_feature = hidden_feature.contiguous().view(Batch, int(32*pw), int(224/pw), int(224/pw))
+                hidden_features.append(hidden_feature)#转变为对应形式，最后与decoder的cat()
+                
         encoded = self.encoder_norm(hidden_states)#(3,196,768)
-        return encoded, attn_weights
+        return encoded, attn_weights, hidden_features[::-1]#list[None,(3,256,28,28),(3,126,56,56),(3,256,114,114)]
 
 
 class Transformer(nn.Module):
@@ -256,8 +282,8 @@ class Transformer(nn.Module):
 
     def forward(self, input_ids):
         embedding_output, features = self.embeddings(input_ids)
-        encoded, attn_weights = self.encoder(embedding_output)  # (B, n_patch, hidden)
-        return encoded, attn_weights, features
+        encoded, attn_weights, trans_skip = self.encoder(embedding_output)  # (B, n_patch, hidden)
+        return encoded, attn_weights, features, trans_skip #trans_skip -> list[None,(3,256,28,28),(3,126,56,56),(3,256,114,114)]
 
 
 class Conv2dReLU(nn.Sequential):
@@ -308,12 +334,14 @@ class DecoderBlock(nn.Module):
             padding=1,
             use_batchnorm=use_batchnorm,
         )
-        self.up = nn.UpsamplingBilinear2d(scale_factor=2)
+        #self.up = nn.UpsamplingBilinear2d(scale_factor=2)
+        self.norm = nn.BatchNorm2d(in_channels,)
 
     def forward(self, x, skip=None):
-        x = self.up(x)#先扩展一倍block1(3,512,28,28) block3(3,128,112,112)
+        #x = self.up(x)#上采样h,w先扩展一倍b1(3,512,28,28) b3(3,128,112,112)
+        x = self.norm(x)
         if skip is not None:
-            x = torch.cat([x, skip], dim=1)#在dim1连接在一起(3,1024,28,28) (3,192,112,112)
+            x = torch.cat([x, skip], dim=1)#在dim1连接在一起b1(3,1024,28,28) b3(3,192,112,112)
         x = self.conv1(x)#(3,256,28,28) (3,64,112,112)
         x = self.conv2(x)#(3,256,28,28) (3,64,112,112)
         return x
@@ -356,36 +384,52 @@ class DecoderCup(nn.Module):
         ]
         self.blocks = nn.ModuleList(blocks)
 
-        self.up = nn.UpsamplingBilinear2d((14,14))
+        up_blocks = [
+            nn.UpsamplingBilinear2d(size=(28,28)),
+            nn.UpsamplingBilinear2d(size=(56,56)),
+            nn.UpsamplingBilinear2d(size=(112,112)),
+            nn.UpsamplingBilinear2d(size=(224,224)),
+        ]
+        self.up = nn.ModuleList(up_blocks)
+        
 
-    def forward(self, hidden_states, features=None):# n_patch = (H x W)/(P x P)
+    def forward(self, hidden_states, features=None, trans_features=None):# n_patch = (H x W)/(P x P)
         B, n_patch, hidden = hidden_states.size()  # reshape from (B(Batch_size), n_patch, hidden(D in paper)) to (B, h, w, hidden)
         h, w = int(np.sqrt(n_patch)), int(np.sqrt(n_patch))
         x = hidden_states.permute(0, 2, 1)#维度转换 (B, n_patch, hidden) -> (B, hidden, n_patch)
         x = x.contiguous().view(B, hidden, h, w)#先用contiguous断开连接，重新建立一个和x一样的数据；再重新排布。(3,768,14,14)
         x = self.conv_more(x)#(3,512,14,14)
-        if h < 14:
-            x = self.up(x)
+        
         for i, decoder_block in enumerate(self.blocks):# 4个blocks，最后一个blocks没有skip
             #此处有两层判断：
             if features is not None:#按照feature判断
                 skip = features[i] if (i < self.config.n_skip) else None #按照skip的个数判断
             else:
                 skip = None
+            
+            if trans_features is not None:
+                trans_skip = trans_features[i] if (i < self.config.n_skip_trans) else None #按照skip的个数判断
+            else:
+                trans_skip = None
+
+            if trans_skip is not None:
+                #x = torch.cat([x, trans_skip],dim=2)
+                x = x + trans_skip
+            x = self.up[i](x)
             x = decoder_block(x, skip=skip)
             '''
             i=0  x = (3,512,14,14) skip = (3,512,28,28)
-            i=1  x = (3,256,28,28) skip = (3,256,56,56)
-            i=2  x = (3,128,56,56) skip = (3,64,112,112)
-            i=3  x = (3,64,112,112) skip = None
+            i=2  x = (3,256,28,28) skip = (3,256,56,56)
+            i=3  x = (3,128,56,56) skip = (3,64,112,112)
+            i=4  x = (3,64,112,112) skip = None
             '''
         return x #(3,16,224,224)
 
 
 
-class VisionTransformer(nn.Module):
+class VisionTransformer_New(nn.Module):
     def __init__(self, config, img_size=224, num_classes=21843, zero_head=False, vis=False):
-        super(VisionTransformer, self).__init__()
+        super(VisionTransformer_New, self).__init__()
         self.num_classes = num_classes # 9
         self.zero_head = zero_head     # False
         self.classifier = config.classifier # 'seg'
@@ -402,65 +446,13 @@ class VisionTransformer(nn.Module):
     def forward(self, x):
         if x.size()[1] == 1:
             x = x.repeat(1,3,1,1)
-        x, attn_weights, features = self.transformer(x)  # (B, n_patch, hidden)
-        x = self.decoder(x, features)
+        x, attn_weights, features, trans_features = self.transformer(x)  # (B, n_patch, hidden)
+        x = self.decoder(x, features, trans_features)
         logits = self.segmentation_head(x)
         return logits#(3,9,224,224)
 
     def load_from(self, weights):
         with torch.no_grad():
-        
-            res_weight = weights
-            self.transformer.embeddings.patch_embeddings.weight.copy_(np2th(weights["embedding/kernel"], conv=True))
-            self.transformer.embeddings.patch_embeddings.bias.copy_(np2th(weights["embedding/bias"]))
-
-            self.transformer.encoder.encoder_norm.weight.copy_(np2th(weights["Transformer/encoder_norm/scale"]))
-            self.transformer.encoder.encoder_norm.bias.copy_(np2th(weights["Transformer/encoder_norm/bias"]))
-
-            posemb = np2th(weights["Transformer/posembed_input/pos_embedding"])
-
-            posemb_new = self.transformer.embeddings.position_embeddings
-            if posemb.size() == posemb_new.size():
-                self.transformer.embeddings.position_embeddings.copy_(posemb)
-            elif posemb.size()[1]-1 == posemb_new.size()[1]:
-                posemb = posemb[:, 1:]
-                self.transformer.embeddings.position_embeddings.copy_(posemb)
-            else:
-                logger.info("load_pretrained: resized variant: %s to %s" % (posemb.size(), posemb_new.size()))
-                ntok_new = posemb_new.size(1)
-                if self.classifier == "seg":
-                    _, posemb_grid = posemb[:, :1], posemb[0, 1:]
-                gs_old = int(np.sqrt(len(posemb_grid)))
-                gs_new = int(np.sqrt(ntok_new))
-                print('load_pretrained: grid-size from %s to %s' % (gs_old, gs_new))
-                posemb_grid = posemb_grid.reshape(gs_old, gs_old, -1)
-                zoom = (gs_new / gs_old, gs_new / gs_old, 1)
-                posemb_grid = ndimage.zoom(posemb_grid, zoom, order=1)  # th2np
-                posemb_grid = posemb_grid.reshape(1, gs_new * gs_new, -1)
-                posemb = posemb_grid
-                self.transformer.embeddings.position_embeddings.copy_(np2th(posemb))
-
-            # Encoder whole
-            for bname, block in self.transformer.encoder.named_children():
-                for uname, unit in block.named_children():
-                    unit.load_from(weights, n_block=uname)
-
-            if self.transformer.embeddings.hybrid:
-                self.transformer.embeddings.hybrid_model.root.conv.weight.copy_(np2th(res_weight["conv_root/kernel"], conv=True))
-                gn_weight = np2th(res_weight["gn_root/scale"]).view(-1)
-                gn_bias = np2th(res_weight["gn_root/bias"]).view(-1)
-                self.transformer.embeddings.hybrid_model.root.gn.weight.copy_(gn_weight)
-                self.transformer.embeddings.hybrid_model.root.gn.bias.copy_(gn_bias)
-
-                for bname, block in self.transformer.embeddings.hybrid_model.body.named_children():
-                    for uname, unit in block.named_children():
-                        unit.load_from(res_weight, n_block=bname, n_unit=uname)
-    
-    def load_from1(self, config):
-        with torch.no_grad():
-            weights = np.load(config.pretrained_path)
-            if config.resnet_pretrained_path is not None:
-                weights1 = np.load(config.resnet_pretrained_path) 
 
             res_weight = weights
             self.transformer.embeddings.patch_embeddings.weight.copy_(np2th(weights["embedding/kernel"], conv=True))
@@ -494,6 +486,8 @@ class VisionTransformer(nn.Module):
 
             # Encoder whole
             for bname, block in self.transformer.encoder.named_children():
+                if bname == 'conv_norm':
+                    continue
                 for uname, unit in block.named_children():
                     unit.load_from(weights, n_block=uname)
 
@@ -507,17 +501,16 @@ class VisionTransformer(nn.Module):
                 for bname, block in self.transformer.embeddings.hybrid_model.body.named_children():
                     for uname, unit in block.named_children():
                         unit.load_from(res_weight, n_block=bname, n_unit=uname)
-
 
 
 CONFIGS = {
-    'ViT-B_16': configs.get_b16_config(),#Runnable n_skip=0
-    'ViT-B_32': configs.get_b32_config(),#Runnable n_skip=0
-    'ViT-L_16': configs.get_l16_config(),#Runnable n_skip=0
+    'ViT-B_16': configs.get_b16_config(),
+    'ViT-B_32': configs.get_b32_config(),
+    'ViT-L_16': configs.get_l16_config(),
     'ViT-L_32': configs.get_l32_config(),
     'ViT-H_14': configs.get_h14_config(),
-    'R50-ViT-B_16': configs.get_r50_b16_config(),#Runnable
-    'R50-ViT-L_16': configs.get_r50_l16_config(),#无法直接运行，下载的预训练模型的参数与网络结构不匹配
+    'R50-ViT-B_16': configs.get_r50_b16_config(),
+    'R50-ViT-L_16': configs.get_r50_l16_config(),
     'testing': configs.get_testing(),
 }
 

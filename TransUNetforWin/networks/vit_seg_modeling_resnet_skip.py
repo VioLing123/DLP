@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def np2th(weights, conv=False):
+def np2th(weights, conv=False):#改变形状
     """Possibly convert HWIO to OIHW."""
     if conv:
         weights = weights.transpose([3, 2, 0, 1])
@@ -55,7 +55,7 @@ class PreActBottleneck(nn.Module):
         if (stride != 1 or cin != cout):
             # Projection also with pre-activation according to paper.
             self.downsample = conv1x1(cin, cout, stride, bias=False)
-            self.gn_proj = nn.GroupNorm(cout, cout)
+            self.gn_proj = nn.GroupNorm(cout, cout)#GroupNorm 不会改变输入张量的shape，它只是按照group做normalization
 
     def forward(self, x):
 
@@ -114,21 +114,25 @@ class ResNetV2(nn.Module):
 
     def __init__(self, block_units, width_factor):
         super().__init__()
-        width = int(64 * width_factor)
-        self.width = width
+        width = int(64 * width_factor)#64
+        self.width = width#64
 
+        # Using Sequential with OrderedDict. This is functionally the
+        # same as the above code
         self.root = nn.Sequential(OrderedDict([
             ('conv', StdConv2d(3, width, kernel_size=7, stride=2, bias=False, padding=3)),
             ('gn', nn.GroupNorm(32, width, eps=1e-6)),
             ('relu', nn.ReLU(inplace=True)),
             # ('pool', nn.MaxPool2d(kernel_size=3, stride=2, padding=0))
         ]))
-
+        #python f-string格式化输出   {i:d}即十进制表示的数字i
         self.body = nn.Sequential(OrderedDict([
+            # 其为list + list的形式，每个list中为tuple
+            #按照dict(list)的方式创造有序字典
             ('block1/', nn.Sequential(OrderedDict(
                 [('unit1/', PreActBottleneck(cin=width, cout=width*4, cmid=width))] +
                 [(f'unit{i:d}/', PreActBottleneck(cin=width*4, cout=width*4, cmid=width)) for i in range(2, block_units[0] + 1)],
-                ))),
+                ))), 
             ('block2/', nn.Sequential(OrderedDict(
                 [('unit1/', PreActBottleneck(cin=width*4, cout=width*8, cmid=width*2, stride=2))] +
                 [(f'unit{i:d}/', PreActBottleneck(cin=width*8, cout=width*8, cmid=width*2)) for i in range(2, block_units[1] + 1)],
@@ -141,20 +145,20 @@ class ResNetV2(nn.Module):
 
     def forward(self, x):
         features = []
-        b, c, in_size, _ = x.size()
-        x = self.root(x)
-        features.append(x)
-        x = nn.MaxPool2d(kernel_size=3, stride=2, padding=0)(x)
-        for i in range(len(self.body)-1):
-            x = self.body[i](x)
-            right_size = int(in_size / 4 / (i+1))
-            if x.size()[2] != right_size:
+        b, c, in_size, _ = x.size() #(3,3,224,224)
+        x = self.root(x)#(3,64,112,112)
+        features.append(x)#features[(3,64,112,112),]
+        x = nn.MaxPool2d(kernel_size=3, stride=2, padding=0)(x)#(3,64,55,55)
+        for i in range(len(self.body)-1):#for i in range(2):
+            x = self.body[i](x)#block1 -> (3,256,55,55)  block2 -> (3,512,28,28)
+            right_size = int(in_size / 4 / (i+1))#224/4/(i+1) -> (56, 28)
+            if x.size()[2] != right_size:#block1时进入
                 pad = right_size - x.size()[2]
                 assert pad < 3 and pad > 0, "x {} should {}".format(x.size(), right_size)
-                feat = torch.zeros((b, x.size()[1], right_size, right_size), device=x.device)
-                feat[:, :, 0:x.size()[2], 0:x.size()[3]] = x[:]
+                feat = torch.zeros((b, x.size()[1], right_size, right_size), device=x.device)#先构造一个与目标结相同的全为零的Tensor
+                feat[:, :, 0:x.size()[2], 0:x.size()[3]] = x[:]#复制(3,256,56,56)
             else:
-                feat = x
-            features.append(feat)
-        x = self.body[-1](x)
+                feat = x#block2时进入(3,512,28,28)
+            features.append(feat)#list([(3,64,112,112),(3,256,56,56),(3,512,28,28)])
+        x = self.body[-1](x)#block3 -> (3,1024,14,14)
         return x, features[::-1]
