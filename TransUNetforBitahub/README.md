@@ -24,15 +24,13 @@ h5py
 
 ### 2.程序修改：
 
-注意在bitahub上（ `linux`  环境）， `DataLoader` 函数中 `num_worker` 可以设置大于 `0` 。
-
-**在 `trainer.py` 中其设置为 8** ，**在 `test.py` 中设置为 1** 。训练时间可以有明显提速（4小时内）。
+注意在bitahub上（ `linux`  环境）， `DataLoader` 函数中 `num_worker` 可以设置大于 `0` 。论文中代码**在 `trainer.py` 中其设置为 8** ，**在 `test.py` 中设置为 1** 。训练时间可以有明显提速（4小时内）。
 
 在 `windows` 环境中，**其均需设置为0**
 
-**应当运行`train.py`和`test_data.py`**
+**运行`train.py`训练模型，运行`test.py`测试模型**
 
-已经在模型文件中保存某次训练的`.pth`文件，可以直接运行`test_data.py`来测试
+同时已经在模型文件中保存某次训练的`.pth`文件，可以直接运行`test_data.py`来测试
 
 ### 3.TransUnet运行命令：
 
